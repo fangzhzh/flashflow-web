@@ -262,7 +262,7 @@ export default function DocsPage() {
                     <p className="pl-4">const prevCards = [...cards]; // {isZh ? "创建当前内存状态快照" : "Capture active state snapshot"}</p>
                     <p className="pl-4">setCards(cards.filter(c =&gt; c.id !== cardId)); // {isZh ? "立即同步变更本地UI状态" : "Mutate state instantly in UI"}</p>
                     <p className="pl-4">try &#123;</p>
-                    <p className="pl-8">await apiClient.delete(`/flashcards/\${cardId}`); // {isZh ? "异步发起网络请求" : "Dispatch async API execution"}</p>
+                    <p className="pl-8">{"await apiClient.delete(`/flashcards/${cardId}`);"} // {isZh ? "异步发起网络请求" : "Dispatch async API execution"}</p>
                     <p className="pl-4">&#125; catch (error) &#123;</p>
                     <p className="pl-8">setCards(prevCards); // {isZh ? "捕获异常并执行回滚" : "Rollback to snapshot on error"}</p>
                     <p className="pl-8">showToast("Transaction failed", "destructive");</p>
