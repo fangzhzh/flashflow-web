@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { BookOpenText, LayoutDashboard, Timer, Languages, LogIn, LogOut, UserCircle, KeyRound, ListChecks, GitFork, Swords } from 'lucide-react';
 import { ThemeToggle } from '@/components/ThemeToggle';
+import TechnicalFAQDialog from '@/components/TechnicalFAQDialog';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { useI18n, useChangeLocale, useCurrentLocale } from '@/lib/i18n/client';
@@ -122,6 +123,8 @@ export default function Header() {
           <div className="hidden sm:inline-flex">
             <ThemeToggle />
           </div>
+
+          <TechnicalFAQDialog />
 
           {authLoading ? (
             <Button variant="outline" size="icon" disabled className="h-8 w-8 md:h-9 md:w-9">
