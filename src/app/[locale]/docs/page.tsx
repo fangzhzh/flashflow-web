@@ -6,6 +6,7 @@ import { useCurrentLocale } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Layers,
   Code,
@@ -20,6 +21,168 @@ import {
   ChevronRight
 } from "lucide-react";
 
+// ==========================================
+// STRING CONSTANTS FOR SYSTEM SPECIFICATIONS
+// ==========================================
+
+const SYSTEM_OVERVIEW_FLOW = `[Browser (Next.js Client)] 
+       │
+       │ (CORS Preflight + HTTPS REST Request)
+       │ (Authorization: Bearer <Firebase_JWT_ID_Token>)
+       ▼
+[NestJS API Gateway / Backend Service]
+       │
+       ├─► [AuthGuard] (Verify Token Signature via Firebase Admin SDK)
+       ├─► [ValidationPipe] (DTO Validation & Type Cast)
+       ▼
+ [Controller] ──► [Service] ──► [Firestore DB] (Scoped by Verified User UID)
+                                 ▲
+                                 └─► [AI Service] ──► [Gemini Pro API]`;
+
+const OPTIMISTIC_UPDATE_FLOW = `1. 用户操作触发事件（如删除卡片）。
+2. UI 线程保存当前状态镜像 const prevCards = [...cards]。
+3. 立即触发本地渲染状态 setCards(cards.filter(c => c.id !== targetId))。
+4. 后台执行 API 请求 await apiClient.delete(...）。
+5. 若请求失败，在 catch 块中回滚：setCards(prevCards) 并弹出 Toast。`;
+
+const OPTIMISTIC_UPDATE_FLOW_EN = `1. User triggers an action (e.g., deletes a card).
+2. UI thread captures state snapshot: const prevCards = [...cards].
+3. Local UI state updates instantly: setCards(cards.filter(c => c.id !== targetId)) (0ms delay).
+4. Asynchronous API request is sent in background.
+5. Upon failure, the catch block restores state: setCards(prevCards) and shows toast.`;
+
+const DELETE_FLASHCARD_CODE = `// src/contexts/FlashcardsContext.tsx 中删除卡片的真实工程实现
+const deleteFlashcard = async (cardId: string): Promise<boolean> => {
+  // 1. 获取当前状态的深拷贝镜像，作为回滚断点
+  const rollbackBackup = [...flashcards];
+
+  // 2. 乐观更新：同步修改本地 State，驱动 UI 重新渲染（0ms 响应）
+  setFlashcards((prev) => prev.filter((card) => card.id !== cardId));
+
+  try {
+    // 3. 异步向 BFF 发起物理删除请求
+    const response = await apiClient.delete(\`/flashcards/\${cardId}\`);
+    if (!response.success) {
+      throw new Error("API responded with failure status");
+    }
+    return true;
+  } catch (error) {
+    // 4. 出现网络超时、CORS 拦截或 500 异常时，将状态退回到备份镜像
+    setFlashcards(rollbackBackup);
+    
+    // 5. 将系统级错误格式化并弹出友好提示
+    console.error("Optimistic Update failed. Rolling back...", error);
+    showToast(
+      isZh ? "删除卡片失败，网络连接异常" : "Failed to delete card due to network issues",
+      "destructive"
+    );
+    return false;
+  }
+};`;
+
+const NESTJS_PIPELINE_FLOW = `Request ──► Middleware (Logger) ──► Guards (AuthGuard JWT) ──► Interceptors (Timing) ──► Pipes (DTO Validation) ──► Controller (Routing) ──► Service (Business/TX) ──► Response`;
+
+const DTO_VALIDATION_CODE = `// src/tasks/dto/create-task.dto.ts
+import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
+
+export class CreateTaskDto {
+  @IsString()
+  @IsNotEmpty()
+  readonly title: string;
+
+  @IsOptional()
+  @IsString()
+  readonly notes?: string;
+}`;
+
+const AUTH_GUARD_CODE = `// src/auth/auth.guard.ts 核心签名解密与验证实现
+@Injectable()
+export class AuthGuard implements CanActivate {
+  constructor(private readonly firebaseService: FirebaseService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest();
+    const authHeader = request.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Missing or malformed Authorization header');
+    }
+
+    const token = authHeader.split(' ')[1];
+    try {
+      // 1. 调用 Admin SDK 验签：包含非对称签名解密、证书缓存与失效检查
+      const decodedToken = await this.firebaseService.auth.verifyIdToken(token);
+      
+      // 2. 将可信 UID 注入 request 上下文
+      request.user = {
+        uid: decodedToken.uid,
+        email: decodedToken.email,
+      };
+      return true;
+    } catch (error) {
+      throw new UnauthorizedException('Invalid or expired credential');
+    }
+  }
+}`;
+
+const CASCADE_DELETE_CODE = `// src/decks/decks.service.ts 中的级联删除事务实现
+async function deleteDeckCascading(userId: string, deckId: string): Promise<void> {
+  const deckRef = this.db.collection(\`users/\${userId}/decks\`).doc(deckId);
+  const cardsCollectionRef = this.db.collection(\`users/\${userId}/flashcards\`);
+
+  await this.db.runTransaction(async (transaction) => {
+    // 1. 首先在隔离事务块中执行读取操作
+    const cardsSnapshot = await transaction.get(
+      cardsCollectionRef.where('deckId', '==', deckId)
+    );
+
+    const deckDoc = await transaction.get(deckRef);
+    if (!deckDoc.exists) {
+      throw new NotFoundException('Target deck not found');
+    }
+
+    // 2. 依次登记删除指令
+    cardsSnapshot.docs.forEach((doc) => {
+      transaction.delete(doc.ref);
+    });
+
+    transaction.delete(deckRef);
+  });
+}`;
+
+const GEMINI_CONFIG_CODE = `// src/ai/ai.service.ts
+import { GoogleGenAI } from '@google/genai';
+
+async function generateCardsFromText(prompt: string): Promise<CardDto[]> {
+  const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_GENAI_API_KEY });
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-1.5-pro',
+    contents: prompt,
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'ARRAY',
+        description: 'List of generated active recall flashcards.',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            front: { type: 'STRING' },
+            back: { type: 'STRING' }
+          },
+          required: ['front', 'back']
+        }
+      }
+    }
+  });
+
+  return JSON.parse(response.text);
+}`;
+
+// ==========================================
+// REACT COMPONENT COMPILING ROUTE
+// ==========================================
+
 export default function DocsPage() {
   const currentLocale = useCurrentLocale();
   const isZh = currentLocale === "zh";
@@ -31,7 +194,7 @@ export default function DocsPage() {
           id: "system-overview",
           title: "1. 整体架构与拓扑设计",
           icon: Layers,
-          subtitle: "基于 REST 与 Bearer Token 的解耦双层设计",
+          subtitle: "前后端物理分离与 BFF 架构演进",
         },
         {
           id: "frontend",
@@ -157,12 +320,12 @@ export default function DocsPage() {
 
       <div className="flex-1 max-w-7xl w-full mx-auto flex flex-col md:flex-row gap-6 p-4 sm:p-6 min-h-0">
         {/* Left Sidebar - Navigation */}
-        <aside className="w-full md:w-64 flex-shrink-0 md:sticky md:top-20 md:h-[calc(100vh-9rem)] flex flex-col gap-2">
+        <aside className="w-full md:w-80 flex-shrink-0 md:sticky md:top-20 md:h-[calc(100vh-9rem)] flex flex-col gap-2">
           <div className="px-3 py-1 text-xs font-bold text-muted-foreground uppercase tracking-widest">
             {isZh ? "文档目录" : "Table of Contents"}
           </div>
           <ScrollArea className="flex-1 pr-2">
-            <nav className="flex flex-col gap-1">
+            <nav className="flex flex-col gap-1.5">
               {sections.map((sec) => {
                 const Icon = sec.icon;
                 const isActive = activeSection === sec.id;
@@ -170,10 +333,10 @@ export default function DocsPage() {
                   <button
                     key={sec.id}
                     onClick={() => handleScrollTo(sec.id)}
-                    className={`w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                    className={`w-full text-left flex items-center gap-3 px-3.5 py-3 rounded-lg text-xs sm:text-sm font-medium transition-all border ${
                       isActive
-                        ? "bg-primary text-primary-foreground shadow-sm"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                        ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground border-transparent"
                     }`}
                   >
                     <Icon className="h-4 w-4 shrink-0" />
@@ -220,21 +383,9 @@ export default function DocsPage() {
                       ? "系统采用基于表示层（Presentation Layer）与应用服务层（Application Layer）解耦的双层云原生架构。前端主要承载人机交互与状态同步分发，后端（BFF 模式）提供安全沙箱、业务 API 网关以及基础设施连接。"
                       : "The system implements a decoupled two-tier cloud-native architecture separating the presentation layer from the application service layer. The frontend hosts user interactions and state synchronization, while the backend acts as a secure BFF (Backend-for-Frontend) gateway."}
                   </p>
-                  <div className="bg-muted p-3.5 rounded-lg font-mono text-[10px] sm:text-xs leading-relaxed overflow-x-auto">
-                    {`[Browser (Next.js Client)] 
-       │
-       │ (CORS Preflight + HTTPS REST Request)
-       │ (Authorization: Bearer <Firebase_JWT_ID_Token>)
-       ▼
-[NestJS API Gateway / Backend Service]
-       │
-       ├─► [AuthGuard] (Verify Token Signature via Firebase Admin SDK)
-       ├─► [ValidationPipe] (DTO Validation & Type Cast)
-       ▼
- [Controller] ──► [Service] ──► [Firestore DB] (Scoped by Verified User UID)
-                                 ▲
-                                 └─► [AI Service] ──► [Gemini Pro API]`}
-                  </div>
+                  <pre className="bg-muted p-3.5 rounded-lg font-mono text-[10px] sm:text-xs leading-relaxed overflow-x-auto border whitespace-pre">
+                    {SYSTEM_OVERVIEW_FLOW}
+                  </pre>
                   <ul className="list-disc list-inside pl-2 space-y-1">
                     <li><strong>{isZh ? "服务松耦合" : "Service Decoupling"}</strong>：{isZh ? "前端（flashflow-web）与后端（flashflow-server）作为独立的无服务器（Serverless）实例在云端独立部署运行，规避了单一技术栈部署导致的整体不可用风险。" : "Frontend (flashflow-web) and backend (flashflow-server) operate as independent Serverless execution units, mitigating deployment-related system downtime."}</li>
                     <li><strong>{isZh ? "数据安全屏障" : "Encapsulated Access"}</strong>：{isZh ? "完全禁用了客户端直接读写 Firestore 数据库的底层权限。所有数据存取请求均通过受信任的后端服务管道进行路由与审计。" : "Direct database operations by client SDKs are disabled. All database mutations are fully routed and audited via trusted NestJS services."}</li>
@@ -256,18 +407,15 @@ export default function DocsPage() {
                       ? "前端基于 Next.js 15 混合渲染架构与 React 18 构建。为消除网络延迟对用户操作带来的阻塞感，系统在 FlashcardsContext 状态调度中实现了基于乐观并发的 UI 更新机制（Optimistic Updates）："
                       : "The frontend is built on Next.js 15 and React 18. To eliminate network latency overhead during mutations, the application layer implements Optimistic UI state updates within domain-level contexts:"}
                   </p>
-                  <div className="bg-muted p-3.5 rounded-lg font-mono text-[11px] sm:text-xs space-y-1 overflow-x-auto">
-                    <p>// {isZh ? "乐观更新与状态回滚核心逻辑" : "Optimistic Update & State Rollback Flow"}</p>
-                    <p>const handleDelete = async (cardId: string) =&gt; &#123;</p>
-                    <p className="pl-4">const prevCards = [...cards]; // {isZh ? "创建当前内存状态快照" : "Capture active state snapshot"}</p>
-                    <p className="pl-4">setCards(cards.filter(c =&gt; c.id !== cardId)); // {isZh ? "立即同步变更本地UI状态" : "Mutate state instantly in UI"}</p>
-                    <p className="pl-4">try &#123;</p>
-                    <p className="pl-8">{"await apiClient.delete(`/flashcards/${cardId}`);"} // {isZh ? "异步发起网络请求" : "Dispatch async API execution"}</p>
-                    <p className="pl-4">&#125; catch (error) &#123;</p>
-                    <p className="pl-8">setCards(prevCards); // {isZh ? "捕获异常并执行回滚" : "Rollback to snapshot on error"}</p>
-                    <p className="pl-8">showToast("Transaction failed", "destructive");</p>
-                    <p className="pl-4">&#125;</p>
-                    <p>&#125;</p>
+                  <pre className="bg-muted p-3.5 rounded-lg font-mono text-[10px] sm:text-xs leading-relaxed overflow-x-auto border whitespace-pre">
+                    {isZh ? OPTIMISTIC_UPDATE_FLOW : OPTIMISTIC_UPDATE_FLOW_EN}
+                  </pre>
+                  
+                  <div className="space-y-2">
+                    <h3 className="text-foreground font-semibold text-sm">{isZh ? "乐观更新与异常回滚机制 TypeScript 代码分析" : "TypeScript Implementation of Optimistic State Mutation & Rollback"}</h3>
+                    <pre className="bg-muted p-4 rounded-lg font-mono text-[11px] sm:text-xs overflow-x-auto border whitespace-pre">
+                      {DELETE_FLASHCARD_CODE}
+                    </pre>
                   </div>
                   <p>
                     {isZh
@@ -291,13 +439,15 @@ export default function DocsPage() {
                       ? "后端 NestJS 系统遵循依赖注入（Dependency Injection）原则，将通信逻辑、鉴权安全与领域业务完全隔离。在服务端接收到客户端请求后，处理管线将执行如下生命周期："
                       : "The NestJS backend applies Inversion of Control (IoC) to separate transport layers from core domain logic. The request pipeline executes along a strict architectural flow:"}
                   </p>
-                  <div className="bg-muted p-2.5 rounded font-mono text-[11px] sm:text-xs my-1 space-y-1 overflow-x-auto">
-                    <p><strong>HTTP Request</strong> ──► <strong>Guards</strong> (JWT验签) ──► <strong>Interceptors</strong> (性能追踪) ──► <strong>Pipes</strong> (DTO 校验与类型转换) ──► <strong>Controller</strong> (分发) ──► <strong>Service</strong> ──► <strong>Response</strong></p>
+                  <pre className="bg-muted p-3.5 rounded-lg font-mono text-[10px] sm:text-xs leading-relaxed overflow-x-auto border whitespace-pre">
+                    {NESTJS_PIPELINE_FLOW}
+                  </pre>
+                  <div className="space-y-2">
+                    <h3 className="text-foreground font-semibold text-sm">{isZh ? "运行时 DTO 约束（class-validator）" : "Runtime DTO Schema Protection"}</h3>
+                    <pre className="bg-muted p-4 rounded-lg font-mono text-[11px] sm:text-xs overflow-x-auto border whitespace-pre">
+                      {DTO_VALIDATION_CODE}
+                    </pre>
                   </div>
-                  <ul className="list-disc list-inside pl-2 space-y-1">
-                    <li><strong>{isZh ? "运行时 DTO 约束" : "ValidationPipe Constraints"}</strong>：{isZh ? "通过配置全局 ValidationPipe，系统结合 class-validator 对每个入参对象进行非空、强类型等属性校验。格式非法的 Payload 会在进入 Controller 业务逻辑之前被抛弃，并统一响应 400 Bad Request。" : "A global ValidationPipe intercepts payloads, enforcing class-validator constraints. Invalid formatting is rejected automatically before handler execution with a 400 status."}</li>
-                    <li><strong>{isZh ? "时间戳统一序列化" : "Unified Serialization"}</strong>：{isZh ? "由于底层 Firestore 读写的内置时间戳对象在不同技术栈之间存在反序列化分歧，业务层在输出数据前，通过拦截管道统一将其格式化为标准的 ISO-8601 字符串格式。" : "All Firestore Timestamp properties are normalized to ISO-8601 string representations in the serialization step, preventing client-side compilation errors."}</li>
-                  </ul>
                 </div>
               </section>
 
@@ -315,8 +465,11 @@ export default function DocsPage() {
                       ? "鉴权层采用基于 JWT 数字签名的非对称解密校验，确保用户会话的真实性并防止越权行为："
                       : "The authentication layer utilizes JWT asymmetric signature verification to validate user identity and prevent unauthorized access:"}
                   </p>
+                  <pre className="bg-muted p-4 rounded-lg font-mono text-[11px] sm:text-xs overflow-x-auto border whitespace-pre">
+                    {AUTH_GUARD_CODE}
+                  </pre>
                   <ul className="list-disc list-inside pl-2 space-y-1">
-                    <li><strong>{isZh ? "非对称解密验签" : "Asymmetric Decryption"}</strong>：{isZh ? "客户端登录获取的 Firebase JWT ID 令牌随 Authorization 头部发送至后端。NestJS AuthGuard 动态抓取 Google 公开的数字证书（应用本地支持 LRU 高性能缓存），验证签名算法、Audience、过期时间以及 Issuer 标识符。" : "Short-lived ID tokens are validated by NestJS AuthGuard using dynamically fetched certificates (backed by local LRU cache). The guard verifies signature legitimacy, audience claims, and expiration bounds."}</li>
+                    <li><strong>{isZh ? "非对称解密验签" : "Asymmetric Decryption"}</strong>：{isZh ? "客户端登录获取的 Firebase JWT ID 令牌随 Authorization 头部发送至后端。NestJS AuthGuard 动态抓取 Google 公开的数字证书，验证签名算法、Audience、过期时间以及 Issuer 标识符。" : "Short-lived ID tokens are validated by NestJS AuthGuard using dynamically fetched certificates. The guard verifies signature legitimacy, audience claims, and expiration bounds."}</li>
                     <li><strong>{isZh ? "防止水平越权设计" : "Prevention of Privilege Escalation"}</strong>：{isZh ? "令牌解密成功后，系统强制使用从 Token 中提取并经验证的 uid 构建数据操作路径，如 `users/{verified_uid}/collections/...`。系统完全废弃前端传入的任何 userId 参数，实现物理级的数据存储隔离。" : "The verified uid is attached to the session context. All database storage endpoints are scoped directly to `users/{verified_uid}/...`. Client-supplied user identifiers are completely ignored to mitigate injection risks."}</li>
                   </ul>
                 </div>
@@ -380,11 +533,9 @@ export default function DocsPage() {
                       ? "对于无模式（NoSQL）文档数据库，不存在底层的数据库级联约束。删除一个主实体文档（如 Deck）时，如果不清理关联的数据，会留下无关联的孤立节点并导致逻辑混乱。"
                       : "For schema-less document databases, cascade constraints are not enforced by the storage layer. Deleting a parent document (like a Deck) without removing sub-entities leaves orphaned references."}
                   </p>
-                  <p>
-                    {isZh
-                      ? "为此，NestJS 服务层引入了基于乐观并发控制（OCC）的 Firestore 事务来处理级联操作："
-                      : "To enforce integrity, the backend runs atomic transactions using Optimistic Concurrency Control (OCC):"}
-                  </p>
+                  <pre className="bg-muted p-4 rounded-lg font-mono text-[11px] sm:text-xs overflow-x-auto border whitespace-pre">
+                    {CASCADE_DELETE_CODE}
+                  </pre>
                   <ul className="list-disc list-inside pl-2 space-y-1">
                     <li><strong>{isZh ? "先读后写原子性" : "Read-before-Write Constraint"}</strong>：{isZh ? "Firestore 事务要求必须在读取阶段结束后才能执行任何写入。事务初始化后，首先在隔离块中查询目标 Deck 下的全部 Card 文档引用。" : "Transactions enforce that all reads are completed before any write operations. The database transaction first queries all card document references associated with the deck."}</li>
                     <li><strong>{isZh ? "并发冲突自动回滚" : "Conflict Resolution"}</strong>：{isZh ? "如果在读取阶段与最后的写入修改提交之间，这些文档的锁定状态被其他请求修改，事务会自动进行重试和完全回滚，避免部分删除状态导致的一致性问题。" : "If the locked records are altered by a concurrent process before the transaction commits, the transaction automatically rolls back and retries, preventing partial deletions."}</li>
@@ -406,10 +557,12 @@ export default function DocsPage() {
                       ? "为了支持智能的卡片拆解与算法复习题目生成，AI 管道在稳定性和调用开销上进行了优化设计："
                       : "The AI card generation pipeline is optimized to improve prompt engineering, API costs, and performance:"}
                   </p>
+                  <pre className="bg-muted p-4 rounded-lg font-mono text-[11px] sm:text-xs overflow-x-auto border whitespace-pre">
+                    {GEMINI_CONFIG_CODE}
+                  </pre>
                   <ul className="list-disc list-inside pl-2 space-y-1">
-                    <li><strong>{isZh ? "JSON Schema 结构化输出" : "Structured Output Schema"}</strong>：{isZh ? "后端调用 Gemini API 时设置 responseMimeType: 'application/json'，并在配置中声明了严格的 JSON Schema。约束大模型输出精确匹配 { front: string, back: string }[] 数组结构，从根本上消除了非结构化纯文本导致的反序列化失败。" : "The backend configures Gemini API with responseMimeType: 'application/json' and specifies a responseSchema constraint matching the card schema, avoiding formatting errors."}</li>
-                    <li><strong>{isZh ? "少样本提示词设计" : "Few-Shot Examples"}</strong>：{isZh ? "在系统级 Prompt 中注入了多组主动召回（Active Recall）对比范式，训练模型剔除多余格式和冗长注释，专注于提取小颗粒度的主问题和标准答案。" : "The system prompt provides contrasted input-output pairs to train the AI model to output atomic, active-recall structures."}</li>
-                    <li><strong>{isZh ? "内容哈希防刷机制" : "Decomposition Caching"}</strong>：{isZh ? "前端会对要进行 AI 拆解的输入文本内容执行哈希并存储于 localStorage 中。如果文本未发生变化，将直接使用缓存的卡片集合，显著减少了对 Gemini API 的调用开销。" : "Identical raw text submissions serve locally from localStorage cache, preventing duplicate API requests and lowering Token costs."}</li>
+                    <li><strong>{isZh ? "JSON Schema 结构化输出" : "Structured Output Schema"}</strong>：{isZh ? "后端调用 Gemini API 时设置 responseMimeType: 'application/json' 并指定 Schema，确保输出精确匹配 { front, back }[] 结构，消除了反序列化错误。" : "The backend configures Gemini API with responseMimeType: 'application/json' and specifies a responseSchema constraint matching the card schema, avoiding formatting errors."}</li>
+                    <li><strong>{isZh ? "少样本提示词设计" : "Few-Shot Examples"}</strong>：{isZh ? "在系统级 Prompt 中注入了多组主动召回对比范式，训练模型剔除多余格式，专注于提取小颗粒度的主问题和答案。" : "The system prompt provides contrasted input-output pairs to train the AI model to output atomic, active-recall structures."}</li>
                   </ul>
                 </div>
               </section>
@@ -429,8 +582,8 @@ export default function DocsPage() {
                       : "Frequent API requests to sync active timers degrade backend efficiency. We implemented a hybrid timer synchronization mechanism:"}
                   </p>
                   <ul className="list-disc list-inside pl-2 space-y-1">
-                    <li><strong>{isZh ? "本地运行沙箱" : "Local Execution Sandbox"}</strong>：{isZh ? "倒计时完全由客户端 React Context 结合浏览器 Native Timer APIs 驱动，断网、休眠或切后台均由本地沙箱平滑推进，提供了优秀的容错表现。" : "Countdowns run inside React Context using high-precision web APIs. Switch tabs, lock screens, or offline states do not interfere with ticking, ensuring low-power stability."}</li>
-                    <li><strong>{isZh ? "5秒轻量级心跳轮询" : "5-Second Heartbeat Polling"}</strong>：{isZh ? "计时激活期间，前端通过 useInterval Hook 定时异步将本地倒计时状态上报给 NestJS 接口。即使单次轮询失败（出现网络抖动），本地倒计时依旧正常运行，并在网络恢复后由下一次心跳轮询自动恢复同步。" : "When online, the client initiates background requests every 5 seconds to synchronize active session states to the NestJS API."}</li>
+                    <li><strong>{isZh ? "本地运行沙箱" : "Local Execution Sandbox"}</strong>：{isZh ? "倒计时完全由客户端 React Context 驱动，断网、休眠或切后台均由本地沙箱平滑推进，提供了优秀的容错表现。" : "Countdowns run inside React Context using high-precision web APIs. Switch tabs, lock screens, or offline states do not interfere with ticking, ensuring low-power stability."}</li>
+                    <li><strong>{isZh ? "5秒轻量级心跳轮询" : "5-Second Heartbeat Polling"}</strong>：{isZh ? "计时激活期间，前端定时异步将本地状态上报给 NestJS 接口。即使单次轮询失败，本地倒计时依旧正常运行，并在网络恢复后自动恢复同步。" : "When online, the client initiates background requests every 5 seconds to synchronize active session states to the NestJS API."}</li>
                   </ul>
                 </div>
               </section>

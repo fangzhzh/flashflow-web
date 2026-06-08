@@ -5,8 +5,7 @@ import withPWAInit from '@ducanh2912/next-pwa';
 const withPWA = withPWAInit({
   dest: 'public',
   register: true,
-  // PWA is enabled for all environments to allow for local-first functionality
-  // swSrc: 'src/service-worker.js', // If you need a custom service worker
+  disable: process.env.NODE_ENV === 'development',
 });
 
 const nextConfig: NextConfig = {
