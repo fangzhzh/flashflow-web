@@ -144,4 +144,13 @@ export class ApiClient {
   async githubReview(variation?: number): Promise<any> {
     return this.request<any>('POST', '/ai/github-review', { variation });
   }
+
+  // --- Concurrency ---
+  async getConcurrencyChallenges(): Promise<any[]> {
+    return this.request<any[]>('GET', '/concurrency/challenges');
+  }
+
+  async verifyConcurrencyCode(challengeId: string, levelId: string, code: string): Promise<any> {
+    return this.request<any>('POST', '/concurrency/verify', { challengeId, levelId, code });
+  }
 }
