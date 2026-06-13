@@ -111,12 +111,16 @@ export const PomodoroProvider = ({ children }: { children: ReactNode }) => {
     };
 
     fetchState();
-    // Poll every 5 seconds
-    const interval = setInterval(fetchState, 5000);
 
-    return () => {
-      clearInterval(interval);
-    };
+    if (typeof window !== 'undefined') {
+      const handleFocus = () => {
+        fetchState();
+      };
+      window.addEventListener('focus', handleFocus);
+      return () => {
+        window.removeEventListener('focus', handleFocus);
+      };
+    }
   }, [user, authLoading, apiClient]);
 
   const formatTime = (seconds: number): string => {
