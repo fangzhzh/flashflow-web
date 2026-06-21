@@ -3,7 +3,9 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
-import { ApiClient } from '@/lib/api-client';
+import { CHALLENGES } from '@/lib/concurrency-challenges';
+import { db } from '@/lib/firebase';
+import { collection, doc, getDocs, setDoc } from 'firebase/firestore';
 import { useI18n } from '@/lib/i18n/client';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
@@ -73,12 +75,10 @@ const simulatedSteps = [
 ];
 
 export default function ConcurrencyClient() {
-  const { user, getIdToken, loading: authLoading } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const t = useI18n();
   const { toast } = useToast();
   const router = useRouter();
-
-  const apiClient = useMemo(() => new ApiClient(getIdToken), [getIdToken]);
 
   // States
   const [challenges, setChallenges] = useState<Challenge[]>([]);
@@ -103,8 +103,23 @@ export default function ConcurrencyClient() {
     if (!user) return;
     try {
       setLoadingChallenges(true);
-      const data = await apiClient.getConcurrencyChallenges();
-      setChallenges(data);
+      const colRef = collection(db, `users/${user.uid}/concurrencyProgress`);
+      const querySnap = await getDocs(colRef);
+      const progressMap: Record<string, Record<string, boolean>> = {};
+      querySnap.forEach((doc) => {
+        progressMap[doc.id] = doc.data() as Record<string, boolean>;
+      });
+
+      setChallenges(CHALLENGES.map((challenge) => {
+        const challengeProgress = progressMap[challenge.id] || {};
+        return {
+          ...challenge,
+          levels: challenge.levels.map((level) => ({
+            ...level,
+            completed: !!challengeProgress[level.id],
+          })),
+        };
+      }));
     } catch (err: any) {
       console.error('Error loading challenges:', err);
       toast({
@@ -115,7 +130,7 @@ export default function ConcurrencyClient() {
     } finally {
       setLoadingChallenges(false);
     }
-  }, [user, apiClient, toast, t]);
+  }, [user, toast, t]);
 
   useEffect(() => {
     if (user) {
@@ -220,8 +235,27 @@ export default function ConcurrencyClient() {
     let apiError: string | null = null;
 
     // Trigger API call
-    apiClient.verifyConcurrencyCode(selectedChallengeId, selectedLevelId, code)
-      .then((result) => {
+    fetch('/api/concurrency/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challengeId: selectedChallengeId, levelId: selectedLevelId, code })
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+        return res.json();
+      })
+      .then(async (result) => {
+        // If passed, save progress to client-side Firestore
+        if (result.passed && user) {
+          const docRef = doc(db, `users/${user.uid}/concurrencyProgress`, selectedChallengeId);
+          await setDoc(docRef, {
+            [selectedLevelId]: true,
+            [`${selectedLevelId}_completedAt`]: new Date().toISOString(),
+          }, { merge: true });
+        }
         responseData = result;
         apiFinished = true;
       })
@@ -270,9 +304,7 @@ export default function ConcurrencyClient() {
             description: 'Level completed! Progress saved to Firestore.',
           });
           // Refresh challenges state to show green checkbox
-          apiClient.getConcurrencyChallenges().then(data => {
-            setChallenges(data);
-          }).catch(e => console.error('Failed to refresh progress', e));
+          fetchChallenges();
         } else {
           logs.push('> [REJECTED] Concurrency audit REJECTED. Potential race conditions or bugs found.');
           toast({
@@ -397,7 +429,7 @@ export default function ConcurrencyClient() {
                         level.difficulty === 'MEDIUM' && "bg-amber-500/10 text-amber-600 dark:text-amber-400",
                         level.difficulty === 'HARD' && "bg-rose-500/10 text-rose-500 dark:text-rose-400"
                       )}>
-                        {t(`concurrency.difficulty.${level.difficulty}` as any)}
+                        {t(`concurrency.difficulty.${level.difficulty}` as any, {})}
                       </span>
                     </button>
                   );
@@ -423,7 +455,7 @@ export default function ConcurrencyClient() {
                     selectedLevel.difficulty === 'MEDIUM' && "bg-amber-500/15 text-amber-600",
                     selectedLevel.difficulty === 'HARD' && "bg-rose-500/15 text-rose-500"
                   )}>
-                    {t(`concurrency.difficulty.${selectedLevel.difficulty}` as any)}
+                    {t(`concurrency.difficulty.${selectedLevel.difficulty}` as any, {})}
                   </span>
                 </div>
                 {selectedLevel.concepts && selectedLevel.concepts.length > 0 && (
@@ -671,7 +703,7 @@ export default function ConcurrencyClient() {
                     ) : (
                       reviewResult.bugs.map((bug, index) => (
                         <div key={index} className="border border-zinc-900 rounded-lg bg-zinc-950/40 p-3 space-y-2.5 text-xs">
-                          <div className="flex justify-between items-center">
+                           <div className="flex justify-between items-center">
                             <span className={cn(
                               "text-[9px] font-mono font-black px-2 py-0.5 rounded border leading-none",
                               bug.severity === 'HIGH' && "bg-rose-500/10 text-rose-400 border-rose-500/20",

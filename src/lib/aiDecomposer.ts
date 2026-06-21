@@ -1,5 +1,3 @@
-import { auth } from '@/lib/firebase';
-
 /**
  * AI-powered flashcard decomposer with localStorage cache.
  * Falls back to returning cards unchanged if API is unavailable.
@@ -57,22 +55,13 @@ export async function aiDecomposeCards(
 
   if (toFetch.length === 0) return resultMap;
 
-  // Get auth token
-  const token = await auth.currentUser?.getIdToken();
-  const headers: HeadersInit = { 'Content-Type': 'application/json' };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
-
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
-
   // Batch into groups
   for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
     const batch = toFetch.slice(i, i + BATCH_SIZE);
     try {
-      const res = await fetch(`${apiBase}/ai/decompose`, {
+      const res = await fetch('/api/game/decompose', {
         method: 'POST',
-        headers,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cards: batch }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

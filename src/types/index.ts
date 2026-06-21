@@ -1,6 +1,6 @@
 
 
-
+import type { User as FirebaseUser } from 'firebase/auth';
 
 export interface Overview {
   id: string;
@@ -42,12 +42,7 @@ export interface FlashcardSourceDataItem {
   [key:string]: any;
 }
 
-export interface AppUser {
-  uid: string;
-  displayName: string | null;
-  email: string | null;
-  photoURL: string | null;
-}
+export type AppUser = Pick<FirebaseUser, 'uid' | 'displayName' | 'email' | 'photoURL'> | null;
 
 export interface PomodoroSessionState {
   userId: string;

@@ -1,9 +1,29 @@
+
 "use client";
-import type { Flashcard, FlashcardSourceDataItem, AppUser, Deck, Task, ArtifactLink, Overview } from '@/types';
+import type { Flashcard, FlashcardSourceDataItem, AppUser, Deck, Task, TaskStatus, RepeatFrequency, TimeInfo, ArtifactLink, ReminderInfo, TaskType, CheckinInfo, Overview } from '@/types';
 import React, { createContext, useContext, ReactNode, useCallback, useMemo, useEffect, useState } from 'react';
+import { db } from '@/lib/firebase';
+import {
+  collection,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  query,
+  orderBy,
+  serverTimestamp,
+  Timestamp,
+  getDocs,
+  writeBatch,
+  where,
+  getDoc,
+  runTransaction,
+  limit,
+  getCountFromServer,
+} from 'firebase/firestore';
 import { useAuth } from './AuthContext';
 import { formatISO, parseISO, subDays } from 'date-fns';
-import { ApiClient } from '@/lib/api-client';
 import flashcardJsonData from '../../flashcard.json';
 
 const EMPTY_FLASHCARDS: Flashcard[] = [];
@@ -52,7 +72,7 @@ interface FlashcardsContextType {
 const FlashcardsContext = createContext<FlashcardsContextType | undefined>(undefined);
 
 export const FlashcardsProvider = ({ children }: { children: ReactNode }) => {
-  const { user, getIdToken } = useAuth();
+  const { user } = useAuth();
   const [flashcards, setFlashcards] = useState<Flashcard[]>(EMPTY_FLASHCARDS);
   const [decks, setDecks] = useState<Deck[]>(EMPTY_DECKS);
   const [tasks, setTasks] = useState<Task[]>(EMPTY_TASKS);
@@ -63,49 +83,107 @@ export const FlashcardsProvider = ({ children }: { children: ReactNode }) => {
   const [isLoadingOverviews, setIsLoadingOverviews] = useState(true);
   const [isSeeding, setIsSeeding] = useState(false);
 
-  const apiClient = useMemo(() => new ApiClient(getIdToken), [getIdToken]);
+  const mapFirestoreDocToTask = (docSnapshot: any): Task => {
+    const data = docSnapshot.data();
+    const { id: _dataId, ...dataWithoutId } = data;
+    return {
+      id: docSnapshot.id,
+      ...dataWithoutId,
+      type: data.type || 'innie',
+      isSilent: data.isSilent || false, // Add isSilent mapping
+      createdAt: data.createdAt instanceof Timestamp ? formatISO(data.createdAt.toDate()) : (typeof data.createdAt === 'string' ? data.createdAt : null),
+      updatedAt: data.updatedAt instanceof Timestamp ? formatISO(data.updatedAt.toDate()) : (typeof data.updatedAt === 'string' ? data.updatedAt : null),
+      timeInfo: {
+        ...data.timeInfo,
+        startDate: data.timeInfo?.startDate instanceof Timestamp ? formatISO(data.timeInfo.startDate.toDate()) : data.timeInfo?.startDate,
+        endDate: data.timeInfo?.endDate instanceof Timestamp ? formatISO(data.timeInfo.endDate.toDate()) : data.timeInfo?.endDate,
+      },
+      artifactLink: data.artifactLink || { flashcardIds: null },
+      reminderInfo: data.reminderInfo || { type: 'none' },
+      checkinInfo: data.checkinInfo || null,
+      overviewId: data.overviewId || null,
+    } as Task;
+  };
 
-  const seedInitialData = useCallback(async () => {
-    if (!user) return;
+  const mapFirestoreDocToOverview = (docSnapshot: any): Overview => {
+    const data = docSnapshot.data();
+    return {
+      id: docSnapshot.id,
+      ...data,
+      artifactLink: data.artifactLink || null,
+      createdAt: data.createdAt instanceof Timestamp ? formatISO(data.createdAt.toDate()) : (typeof data.createdAt === 'string' ? data.createdAt : null),
+      updatedAt: data.updatedAt instanceof Timestamp ? formatISO(data.updatedAt.toDate()) : (typeof data.updatedAt === 'string' ? data.updatedAt : null),
+    } as Overview;
+  }
+
+
+  const seedInitialData = useCallback(async (currentUser: AppUser) => {
+    if (!currentUser || !currentUser.uid) return;
     setIsSeeding(true);
     try {
-      // 1. Check if we already have decks
-      const currentDecks = await apiClient.getDecks();
-      let seedDeckId = '';
-      const existingSeedDeck = currentDecks.find(d => d.name === DEFAULT_SEED_DECK_NAME);
-      if (existingSeedDeck) {
-        seedDeckId = existingSeedDeck.id;
-      } else {
-        const createdDeck = await apiClient.createDeck({ name: DEFAULT_SEED_DECK_NAME });
-        if (createdDeck) {
-          seedDeckId = createdDeck.id;
-          setDecks(prev => [createdDeck, ...prev]);
-        }
+      const flashcardsCollectionRef = collection(db, 'users', currentUser.uid, 'flashcards');
+      const existingSeedQuery = query(flashcardsCollectionRef, where("sourceQuestion", "!=", ""), limit(1));
+      const existingSeedSnapshot = await getDocs(existingSeedQuery);
+
+      if (!existingSeedSnapshot.empty) {
+        setIsSeeding(false);
+        return;
       }
 
-      if (!seedDeckId) return;
+      const decksCollectionRef = collection(db, 'users', currentUser.uid, 'decks');
+      let seedDeckId: string | null = null;
+      const seedDeckQuery = query(decksCollectionRef, where("name", "==", DEFAULT_SEED_DECK_NAME));
+      const seedDeckSnapshot = await getDocs(seedDeckQuery);
+
+      if (seedDeckSnapshot.empty) {
+        const now = serverTimestamp();
+        const newDeckDocRef = await addDoc(decksCollectionRef, {
+          name: DEFAULT_SEED_DECK_NAME,
+          userId: currentUser.uid,
+          createdAt: now,
+          updatedAt: now,
+        });
+        seedDeckId = newDeckDocRef.id;
+      } else {
+        seedDeckId = seedDeckSnapshot.docs[0].id;
+      }
+
+      if (!seedDeckId) {
+        setIsSeeding(false);
+        return;
+      }
 
       const vocabulary = flashcardJsonData.vocabulary as FlashcardSourceDataItem[];
-      if (vocabulary.length === 0) return;
+      if (vocabulary.length === 0) {
+          setIsSeeding(false);
+          return;
+      }
 
-      const cardsToSeed = vocabulary.map(item => ({
-        front: item.question,
-        back: item.answer,
-        deckId: seedDeckId,
-        nextReviewDate: formatISO(new Date(), { representation: 'date' }),
-        interval: 1,
-        status: 'new' as const,
-        sourceQuestion: item.question,
-      }));
-
-      const seeded = await apiClient.createFlashcardsBatch(cardsToSeed);
-      setFlashcards(prev => [...seeded, ...prev]);
+      const batch = writeBatch(db);
+      const nowServerTime = serverTimestamp();
+      vocabulary.forEach(item => {
+        const newCardDocRef = doc(flashcardsCollectionRef);
+        const newCardFromSource: Omit<Flashcard, 'id' | 'createdAt' | 'updatedAt'> & { createdAt: any, updatedAt: any } = {
+          front: item.question,
+          back: item.answer,
+          deckId: seedDeckId,
+          lastReviewed: null,
+          nextReviewDate: formatISO(new Date(), { representation: 'date' }),
+          interval: 1,
+          status: 'new' as 'new',
+          sourceQuestion: item.question,
+          createdAt: nowServerTime,
+          updatedAt: nowServerTime,
+        };
+        batch.set(newCardDocRef, newCardFromSource);
+      });
+      await batch.commit();
     } catch (error) {
       console.error("Error seeding initial flashcards:", error);
     } finally {
       setIsSeeding(false);
     }
-  }, [user, apiClient]);
+  }, []);
 
   useEffect(() => {
     if (user && user.uid) {
@@ -114,260 +192,314 @@ export const FlashcardsProvider = ({ children }: { children: ReactNode }) => {
       setIsLoadingTasks(true);
       setIsLoadingOverviews(true);
 
-      const fetchData = async () => {
-        try {
-          const [fetchedCards, fetchedDecks, fetchedTasks, fetchedOverviews] = await Promise.all([
-            apiClient.getFlashcards(),
-            apiClient.getDecks(),
-            apiClient.getTasks(),
-            apiClient.getOverviews(),
-          ]);
-
-          if (fetchedCards.length === 0) {
-            await seedInitialData();
-            const cardsAfterSeed = await apiClient.getFlashcards();
-            setFlashcards(cardsAfterSeed);
-          } else {
-            setFlashcards(fetchedCards);
-          }
-          setDecks(fetchedDecks);
-          setTasks(fetchedTasks);
-          setOverviews(fetchedOverviews);
-        } catch (error) {
-          console.error("Error fetching user data from backend API:", error);
-        } finally {
-          setIsLoading(false);
-          setIsLoadingDecks(false);
-          setIsLoadingTasks(false);
-          setIsLoadingOverviews(false);
+      const checkAndSeed = async () => {
+        const flashcardsQuery = query(collection(db, 'users', user.uid, 'flashcards'), limit(1));
+        const flashcardsSnapshot = await getDocs(flashcardsQuery);
+        if (flashcardsSnapshot.empty) {
+          await seedInitialData(user);
         }
       };
 
-      fetchData();
+      checkAndSeed().then(() => {
+        const flashcardsCollectionRef = collection(db, 'users', user.uid, 'flashcards');
+        const qFlashcards = query(flashcardsCollectionRef, orderBy('createdAt', 'desc'));
+        const unsubscribeFlashcards = onSnapshot(qFlashcards, (snapshot) => {
+          const fetchedFlashcards = snapshot.docs.map(docSnap => {
+            const data = docSnap.data();
+            return {
+              id: docSnap.id, ...data,
+              createdAt: data.createdAt instanceof Timestamp ? formatISO(data.createdAt.toDate()) : (typeof data.createdAt === 'string' ? data.createdAt : null),
+              updatedAt: data.updatedAt instanceof Timestamp ? formatISO(data.updatedAt.toDate()) : (typeof data.updatedAt === 'string' ? data.updatedAt : null),
+              lastReviewed: data.lastReviewed instanceof Timestamp ? formatISO(data.lastReviewed.toDate()) : data.lastReviewed,
+              nextReviewDate: data.nextReviewDate instanceof Timestamp ? formatISO(data.nextReviewDate.toDate()) : data.nextReviewDate,
+            } as Flashcard;
+          });
+          setFlashcards(fetchedFlashcards);
+          setIsLoading(false);
+        }, (error) => { console.error("Error fetching flashcards:", error); setIsLoading(false); setFlashcards(EMPTY_FLASHCARDS); });
+
+        const decksCollectionRef = collection(db, 'users', user.uid, 'decks');
+        const qDecks = query(decksCollectionRef, orderBy('createdAt', 'desc'));
+        const unsubscribeDecks = onSnapshot(qDecks, (snapshot) => {
+          const fetchedDecks = snapshot.docs.map(docSnap => {
+            const data = docSnap.data();
+            return {
+              id: docSnap.id, ...data,
+              createdAt: data.createdAt instanceof Timestamp ? formatISO(data.createdAt.toDate()) : (typeof data.createdAt === 'string' ? data.createdAt : null),
+              updatedAt: data.updatedAt instanceof Timestamp ? formatISO(data.updatedAt.toDate()) : (typeof data.updatedAt === 'string' ? data.updatedAt : null),
+            } as Deck;
+          });
+          setDecks(fetchedDecks);
+          setIsLoadingDecks(false);
+        }, (error) => { console.error("Error fetching decks:", error); setIsLoadingDecks(false); setDecks(EMPTY_DECKS); });
+
+        const tasksCollectionRef = collection(db, 'users', user.uid, 'tasks');
+        const qTasks = query(tasksCollectionRef, orderBy('createdAt', 'desc'));
+        const unsubscribeTasks = onSnapshot(qTasks, (snapshot) => {
+          const fetchedTasks = snapshot.docs.map(mapFirestoreDocToTask);
+          setTasks(fetchedTasks);
+          setIsLoadingTasks(false);
+        }, (error) => { console.error("Error fetching tasks:", error); setIsLoadingTasks(false); setTasks(EMPTY_TASKS); });
+
+        const overviewsCollectionRef = collection(db, 'users', user.uid, 'overviews');
+        const qOverviews = query(overviewsCollectionRef, orderBy('createdAt', 'desc'));
+        const unsubscribeOverviews = onSnapshot(qOverviews, (snapshot) => {
+          const fetchedOverviews = snapshot.docs.map(mapFirestoreDocToOverview);
+          setOverviews(fetchedOverviews);
+          setIsLoadingOverviews(false);
+        }, (error) => { console.error("Error fetching overviews:", error); setIsLoadingOverviews(false); setOverviews(EMPTY_OVERVIEWS); });
+
+
+        return () => {
+          unsubscribeFlashcards();
+          unsubscribeDecks();
+          unsubscribeTasks();
+          unsubscribeOverviews();
+        };
+      }).catch(err => {
+        console.error("Error during checkAndSeed process:", err);
+        setIsLoading(false); setIsLoadingDecks(false); setIsLoadingTasks(false); setIsLoadingOverviews(false);
+      });
+
     } else {
       setFlashcards(EMPTY_FLASHCARDS);
       setDecks(EMPTY_DECKS);
       setTasks(EMPTY_TASKS);
       setOverviews(EMPTY_OVERVIEWS);
-      setIsLoading(false);
-      setIsLoadingDecks(false);
-      setIsLoadingTasks(false);
-      setIsLoadingOverviews(false);
+      setIsLoading(false); setIsLoadingDecks(false); setIsLoadingTasks(false); setIsLoadingOverviews(false);
     }
-  }, [user, apiClient, seedInitialData]);
+  }, [user, seedInitialData]);
 
   const addFlashcard = useCallback(async (data: { front: string; back: string; deckId?: string | null }): Promise<Flashcard | null> => {
-    if (!user) return null;
+    if (!user || !user.uid) return null;
     try {
-      const created = await apiClient.createFlashcard({
-        front: data.front,
-        back: data.back,
-        deckId: data.deckId || null,
-        nextReviewDate: formatISO(new Date(), { representation: 'date' }),
-        interval: 1,
-        status: 'new',
-      });
-      if (created) {
-        setFlashcards(prev => [created, ...prev]);
-      }
-      return created;
-    } catch (error) {
-      console.error("Error adding flashcard:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+      const flashcardsCollectionRef = collection(db, 'users', user.uid, 'flashcards');
+      const now = serverTimestamp();
+      const newFlashcardData: Omit<Flashcard, 'id' | 'createdAt' | 'updatedAt'> = {
+        front: data.front, back: data.back, deckId: data.deckId || null,
+        lastReviewed: null, nextReviewDate: formatISO(new Date(), { representation: 'date' }),
+        interval: 1, status: 'new' as 'new',
+      };
+      const docRef = await addDoc(flashcardsCollectionRef, { ...newFlashcardData, createdAt: now, updatedAt: now });
+      return { id: docRef.id, ...newFlashcardData, createdAt: formatISO(new Date()), updatedAt: formatISO(new Date()) } as Flashcard;
+    } catch (error) { console.error("Error adding flashcard:", error); return null; }
+  }, [user]);
 
-  const updateFlashcard = useCallback(async (id: string, updates: Partial<Omit<Flashcard, 'id'>>): Promise<Flashcard | null> => {
-    if (!user) return null;
+  const updateFlashcard = useCallback(async (id: string, updates: Partial<Omit<Flashcard, 'id' | 'createdAt'>>): Promise<Flashcard | null> => {
+    if (!user || !user.uid) return null;
     try {
-      const updated = await apiClient.updateFlashcard(id, updates);
-      if (updated) {
-        setFlashcards(prev => prev.map(f => (f.id === id ? updated : f)));
-      }
-      return updated;
-    } catch (error) {
-      console.error("Error updating flashcard:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+      const flashcardDocRef = doc(db, 'users', user.uid, 'flashcards', id);
+      const currentCard = flashcards.find(f=>f.id === id);
+      const deckIdToUpdate = updates.deckId === undefined ? (currentCard?.deckId || null) : (updates.deckId || null);
+      const updateData = { ...updates, deckId: deckIdToUpdate, updatedAt: serverTimestamp() };
+      await updateDoc(flashcardDocRef, updateData);
+      const card = flashcards.find(fc => fc.id === id);
+      return card ? { ...card, ...updates, deckId: updateData.deckId, updatedAt: formatISO(new Date()) } : null;
+    } catch (error) { console.error("Error updating flashcard:", error); return null; }
+  }, [user, flashcards]);
 
   const deleteFlashcard = useCallback(async (id: string) => {
-    if (!user) return;
+    if (!user || !user.uid) return;
     try {
-      await apiClient.deleteFlashcard(id);
-      setFlashcards(prev => prev.filter(f => f.id !== id));
-    } catch (error) {
-      console.error("Error deleting flashcard:", error);
-    }
-  }, [user, apiClient]);
+      await deleteDoc(doc(db, 'users', user.uid, 'flashcards', id));
+    } catch (error) { console.error("Error deleting flashcard:", error); }
+  }, [user]);
 
   const getFlashcardById = useCallback((id: string) => flashcards.find(card => card.id === id), [flashcards]);
 
   const addDeck = useCallback(async (name: string): Promise<Deck | null> => {
-    if (!user) return null;
+    if (!user || !user.uid) return null;
     try {
-      const created = await apiClient.createDeck({ name });
-      if (created) {
-        setDecks(prev => [created, ...prev]);
-      }
-      return created;
-    } catch (error) {
-      console.error("Error adding deck:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+      const decksCollectionRef = collection(db, 'users', user.uid, 'decks');
+      const now = serverTimestamp();
+      const newDeckData = { name, userId: user.uid };
+      const docRef = await addDoc(decksCollectionRef, {...newDeckData, createdAt: now, updatedAt: now });
+      return { id: docRef.id, ...newDeckData, createdAt: formatISO(new Date()), updatedAt: formatISO(new Date()) } as Deck;
+    } catch (error) { console.error("Error adding deck:", error); return null; }
+  }, [user]);
 
-  const updateDeck = useCallback(async (id: string, updates: Partial<Omit<Deck, 'id' | 'userId'>>): Promise<Deck | null> => {
-    if (!user) return null;
+  const updateDeck = useCallback(async (id: string, updates: Partial<Omit<Deck, 'id' | 'userId' | 'createdAt'>>): Promise<Deck | null> => {
+    if (!user || !user.uid) return null;
     try {
-      const updated = await apiClient.updateDeck(id, updates);
-      if (updated) {
-        setDecks(prev => prev.map(d => (d.id === id ? updated : d)));
-      }
-      return updated;
-    } catch (error) {
-      console.error("Error updating deck:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+      const deckDocRef = doc(db, 'users', user.uid, 'decks', id);
+      await updateDoc(deckDocRef, { ...updates, updatedAt: serverTimestamp() });
+      const deck = decks.find(d => d.id === id);
+      return deck ? { ...deck, ...updates, updatedAt: formatISO(new Date()) } : null;
+    } catch (error) { console.error("Error updating deck:", error); return null; }
+  }, [user, decks]);
 
   const deleteDeck = useCallback(async (id: string) => {
-    if (!user) return;
+    if (!user || !user.uid) return;
     try {
-      await apiClient.deleteDeck(id);
-      setDecks(prev => prev.filter(d => d.id !== id));
-      // Cascade delete locally since backend deletes cards where deckId == id
-      setFlashcards(prev => prev.filter(f => f.deckId !== id));
-    } catch (error) {
-      console.error("Error deleting deck:", error);
-    }
-  }, [user, apiClient]);
+      await runTransaction(db, async (transaction) => {
+        const deckDocRef = doc(db, 'users', user.uid, 'decks', id);
+        const flashcardsQuery = query(collection(db, 'users', user.uid, 'flashcards'), where("deckId", "==", id));
+        const flashcardsSnapshot = await getDocs(flashcardsQuery);
+        flashcardsSnapshot.docs.forEach(flashcardDoc => transaction.delete(flashcardDoc.ref));
+        transaction.delete(deckDocRef);
+      });
+    } catch (error) { console.error("Error deleting deck:", error); }
+  }, [user]);
 
   const getDeckById = useCallback((id: string) => decks.find(deck => deck.id === id), [decks]);
 
   const addTask = useCallback(async (data: Omit<Task, 'id' | 'userId' | 'createdAt' | 'updatedAt'>): Promise<Task | null> => {
-    if (!user) return null;
+    if (!user || !user.uid) { console.error("User not authenticated to add task"); return null; }
     try {
-      const created = await apiClient.createTask(data);
-      if (created) {
-        setTasks(prev => [created, ...prev]);
-      }
-      return created;
-    } catch (error) {
-      console.error("Error adding task:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+      const tasksCollectionRef = collection(db, 'users', user.uid, 'tasks');
+      const now = serverTimestamp();
+      const newCheckinInfo = data.checkinInfo ? { ...data.checkinInfo, history: [] } : null;
+      const newTaskData = {
+        ...data,
+        checkinInfo: newCheckinInfo,
+        type: data.type || 'innie',
+        userId: user.uid,
+        status: data.status || 'pending',
+        artifactLink: data.artifactLink || { flashcardIds: null },
+        reminderInfo: data.reminderInfo || { type: 'none' },
+        overviewId: data.overviewId || null,
+        isSilent: data.isSilent || false, // Handle new isSilent flag
+        createdAt: now,
+        updatedAt: now
+      };
+      const docRef = await addDoc(tasksCollectionRef, newTaskData);
+      const localCreatedAt = formatISO(new Date());
+      return {
+        id: docRef.id,
+        userId: user.uid,
+        ...data,
+        checkinInfo: newCheckinInfo,
+        type: data.type || 'innie',
+        status: data.status || 'pending',
+        isSilent: data.isSilent || false,
+        artifactLink: data.artifactLink || { flashcardIds: null },
+        reminderInfo: data.reminderInfo || { type: 'none' },
+        overviewId: data.overviewId || null,
+        createdAt: localCreatedAt,
+        updatedAt: localCreatedAt
+      } as Task;
+    } catch (error) { console.error("Error adding task:", error); return null; }
+  }, [user]);
 
   const updateTask = useCallback(async (id: string, updates: Partial<Omit<Task, 'id' | 'userId' | 'createdAt'>>): Promise<Task | null> => {
-    if (!user) return null;
+    if (!user || !user.uid) { console.error("User not authenticated to update task"); return null; }
     try {
-      const updated = await apiClient.updateTask(id, updates);
-      if (updated) {
-        setTasks(prev => prev.map(t => (t.id === id ? updated : t)));
+      const taskDocRef = doc(db, 'users', user.uid, 'tasks', id);
+      const currentTask = tasks.find(t => t.id === id);
+      
+      const newCheckinInfo = updates.checkinInfo;
+      if (updates.hasOwnProperty('checkinInfo') && newCheckinInfo) {
+        // If checkin mode is being enabled, initialize history array
+        if (!newCheckinInfo.history) {
+            newCheckinInfo.history = [];
+        }
       }
-      return updated;
-    } catch (error) {
-      console.error("Error updating task:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+
+      const updateData: Partial<Omit<Task, 'id' | 'userId' | 'createdAt'>> & { updatedAt: any } = {
+        ...updates,
+        type: updates.type || currentTask?.type || 'innie',
+        isSilent: updates.isSilent === undefined ? currentTask?.isSilent : updates.isSilent, // Handle isSilent
+        artifactLink: updates.artifactLink || currentTask?.artifactLink || { flashcardIds: null },
+        reminderInfo: updates.reminderInfo || currentTask?.reminderInfo || { type: 'none' },
+        checkinInfo: updates.checkinInfo === undefined ? currentTask?.checkinInfo : (updates.checkinInfo || null),
+        overviewId: updates.overviewId === undefined ? currentTask?.overviewId : (updates.overviewId || null),
+        updatedAt: serverTimestamp()
+      };
+
+      await updateDoc(taskDocRef, updateData as any);
+
+      const task = tasks.find(t => t.id === id);
+      return task ? { 
+        ...task, 
+        ...updates, 
+        type: updateData.type, 
+        isSilent: updateData.isSilent, 
+        checkinInfo: updateData.checkinInfo, 
+        overviewId: updateData.overviewId, 
+        updatedAt: formatISO(new Date()) 
+      } as Task : null;
+    } catch (error) { console.error("Error updating task:", error); return null; }
+  }, [user, tasks]);
 
   const deleteTask = useCallback(async (id: string) => {
-    if (!user) return;
+    if (!user || !user.uid) { console.error("User not authenticated to delete task"); return; }
     try {
-      await apiClient.deleteTask(id);
-      setTasks(prev => prev.filter(t => t.id !== id));
-    } catch (error) {
-      console.error("Error deleting task:", error);
-    }
-  }, [user, apiClient]);
+      const taskDocRef = doc(db, 'users', user.uid, 'tasks', id);
+      await deleteDoc(taskDocRef);
+    } catch (error) { console.error("Error deleting task:", error); }
+  }, [user]);
 
   const getTaskById = useCallback((id: string) => tasks.find(task => task.id === id), [tasks]);
 
   const getCompletedTasksCountLast30Days = useCallback(async (): Promise<number> => {
-    if (!user) return 0;
+    if (!user || !user.uid) return 0;
     try {
+      const tasksCollectionRef = collection(db, 'users', user.uid, 'tasks');
       const date30DaysAgo = subDays(new Date(), 30);
-      return tasks.filter(t => {
-        if (t.status !== 'completed' || !t.updatedAt) return false;
-        try {
-          return parseISO(t.updatedAt) >= date30DaysAgo;
-        } catch (_) {
-          return false;
-        }
-      }).length;
+      const q = query(
+        tasksCollectionRef,
+        where('status', '==', 'completed'),
+        where('updatedAt', '>=', Timestamp.fromDate(date30DaysAgo))
+      );
+      const snapshot = await getCountFromServer(q);
+      return snapshot.data().count;
     } catch (error) {
-      console.error("Error calculating completed tasks count:", error);
+      console.error("Error getting completed tasks count:", error);
       return 0;
     }
-  }, [user, tasks]);
+  }, [user]);
 
   const fetchCompletedTasksLast30Days = useCallback(async (): Promise<Task[]> => {
-    if (!user) return [];
+    if (!user || !user.uid) return [];
     try {
+      const tasksCollectionRef = collection(db, 'users', user.uid, 'tasks');
       const date30DaysAgo = subDays(new Date(), 30);
-      return tasks
-        .filter(t => {
-          if (t.status !== 'completed' || !t.updatedAt) return false;
-          try {
-            return parseISO(t.updatedAt) >= date30DaysAgo;
-          } catch (_) {
-            return false;
-          }
-        })
-        .sort((a, b) => {
-          try {
-            return parseISO(b.updatedAt).getTime() - parseISO(a.updatedAt).getTime();
-          } catch (_) {
-            return 0;
-          }
-        });
+      const q = query(
+        tasksCollectionRef,
+        where('status', '==', 'completed'),
+        where('updatedAt', '>=', Timestamp.fromDate(date30DaysAgo)),
+        orderBy('updatedAt', 'desc')
+      );
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(mapFirestoreDocToTask);
     } catch (error) {
       console.error("Error fetching completed tasks:", error);
       return [];
     }
-  }, [user, tasks]);
+  }, [user]);
 
   const addOverview = useCallback(async (data: { title: string; description?: string | null; artifactLink?: ArtifactLink | null }): Promise<Overview | null> => {
-    if (!user) return null;
+    if (!user || !user.uid) return null;
     try {
-      const created = await apiClient.createOverview(data);
-      if (created) {
-        setOverviews(prev => [created, ...prev]);
-      }
-      return created;
-    } catch (error) {
-      console.error("Error adding overview:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+      const overviewsCollectionRef = collection(db, 'users', user.uid, 'overviews');
+      const now = serverTimestamp();
+      const newOverviewData = { ...data, userId: user.uid, artifactLink: data.artifactLink || null };
+      const docRef = await addDoc(overviewsCollectionRef, { ...newOverviewData, createdAt: now, updatedAt: now });
+      return { id: docRef.id, ...newOverviewData, createdAt: formatISO(new Date()), updatedAt: formatISO(new Date()) } as Overview;
+    } catch (error) { console.error("Error adding overview:", error); return null; }
+  }, [user]);
 
-  const updateOverview = useCallback(async (id: string, updates: Partial<Omit<Overview, 'id' | 'userId'>>): Promise<Overview | null> => {
-    if (!user) return null;
+  const updateOverview = useCallback(async (id: string, updates: Partial<Omit<Overview, 'id' | 'userId' | 'createdAt'>>): Promise<Overview | null> => {
+    if (!user || !user.uid) return null;
     try {
-      const updated = await apiClient.updateOverview(id, updates);
-      if (updated) {
-        setOverviews(prev => prev.map(o => (o.id === id ? updated : o)));
-      }
-      return updated;
-    } catch (error) {
-      console.error("Error updating overview:", error);
-      return null;
-    }
-  }, [user, apiClient]);
+      const overviewDocRef = doc(db, 'users', user.uid, 'overviews', id);
+      await updateDoc(overviewDocRef, { ...updates, updatedAt: serverTimestamp() });
+      const overview = overviews.find(ov => ov.id === id);
+      return overview ? { ...overview, ...updates, updatedAt: formatISO(new Date()) } : null;
+    } catch (error) { console.error("Error updating overview:", error); return null; }
+  }, [user, overviews]);
 
   const deleteOverview = useCallback(async (id: string) => {
-    if (!user) return;
+    if (!user || !user.uid) return;
     try {
-      await apiClient.deleteOverview(id);
-      setOverviews(prev => prev.filter(o => o.id !== id));
-    } catch (error) {
-      console.error("Error deleting overview:", error);
-    }
-  }, [user, apiClient]);
+      // Optional: Consider if deleting an overview should also update tasks linked to it.
+      // For now, tasks will retain the overviewId but it will point to a non-existent overview.
+      await deleteDoc(doc(db, 'users', user.uid, 'overviews', id));
+    } catch (error) { console.error("Error deleting overview:", error); }
+  }, [user]);
 
-  const getOverviewById = useCallback((id: string) => overviews.find(o => o.id === id), [overviews]);
+  const getOverviewById = useCallback((id: string) => overviews.find(overview => overview.id === id), [overviews]);
+
 
   const getReviewQueue = useCallback(() => {
     if (isLoading || !user) return [];
@@ -381,9 +513,7 @@ export const FlashcardsProvider = ({ children }: { children: ReactNode }) => {
             return card.nextReviewDate <= today;
           }
           return true;
-        } catch (e) {
-          return true;
-        }
+        } catch (e) { return true; }
       })
       .sort((a, b) => {
         const dateA = a.nextReviewDate && typeof a.nextReviewDate === 'string' && a.nextReviewDate.match(/^\d{4}-\d{2}-\d{2}$/) ? parseISO(a.nextReviewDate) : new Date(0);
@@ -400,18 +530,16 @@ export const FlashcardsProvider = ({ children }: { children: ReactNode }) => {
     if (isLoading || !user) return { total: 0, mastered: 0, learning: 0, new: 0, dueToday: 0 };
     const today = formatISO(new Date(), { representation: 'date' });
     const dueTodayCount = flashcards.filter(c => {
-      if (c.status === 'mastered') return false;
-      if (!c.nextReviewDate) return true;
-      if (typeof c.nextReviewDate === 'string' && c.nextReviewDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
-        return c.nextReviewDate <= today;
-      }
-      return true;
+        if (c.status === 'mastered') return false;
+        if (!c.nextReviewDate) return true;
+        if (typeof c.nextReviewDate === 'string' && c.nextReviewDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+            return c.nextReviewDate <= today;
+        }
+        return true;
     }).length;
     return {
-      total: flashcards.length,
-      mastered: flashcards.filter(c => c.status === 'mastered').length,
-      learning: flashcards.filter(c => c.status === 'learning').length,
-      new: flashcards.filter(c => c.status === 'new').length,
+      total: flashcards.length, mastered: flashcards.filter(c => c.status === 'mastered').length,
+      learning: flashcards.filter(c => c.status === 'learning').length, new: flashcards.filter(c => c.status === 'new').length,
       dueToday: dueTodayCount,
     };
   }, [flashcards, isLoading, user]);
@@ -421,63 +549,28 @@ export const FlashcardsProvider = ({ children }: { children: ReactNode }) => {
     decks: user ? decks : EMPTY_DECKS,
     tasks: user ? tasks : EMPTY_TASKS,
     overviews: user ? overviews : EMPTY_OVERVIEWS,
-    addFlashcard,
-    updateFlashcard,
-    deleteFlashcard,
-    getFlashcardById,
-    addDeck,
-    updateDeck,
-    deleteDeck,
-    getDeckById,
-    addTask,
-    updateTask,
-    deleteTask,
-    getTaskById,
-    getCompletedTasksCountLast30Days,
-    fetchCompletedTasksLast30Days,
-    addOverview,
-    updateOverview,
-    deleteOverview,
-    getOverviewById,
-    getReviewQueue,
-    getStatistics,
+    addFlashcard, updateFlashcard, deleteFlashcard, getFlashcardById,
+    addDeck, updateDeck, deleteDeck, getDeckById,
+    addTask, updateTask, deleteTask, getTaskById,
+    getCompletedTasksCountLast30Days, fetchCompletedTasksLast30Days,
+    addOverview, updateOverview, deleteOverview, getOverviewById,
+    getReviewQueue, getStatistics,
     isLoading: isLoading || !!(user && isSeeding),
     isLoadingDecks: isLoadingDecks || !!(user && isSeeding),
     isLoadingTasks: isLoadingTasks || !!(user && isSeeding),
     isLoadingOverviews: isLoadingOverviews || !!(user && isSeeding),
     isSeeding,
   }), [
-    flashcards,
-    decks,
-    tasks,
-    overviews,
-    addFlashcard,
-    updateFlashcard,
-    deleteFlashcard,
-    getFlashcardById,
-    addDeck,
-    updateDeck,
-    deleteDeck,
-    getDeckById,
-    addTask,
-    updateTask,
-    deleteTask,
-    getTaskById,
-    getCompletedTasksCountLast30Days,
-    fetchCompletedTasksLast30Days,
-    addOverview,
-    updateOverview,
-    deleteOverview,
-    getOverviewById,
-    getReviewQueue,
-    getStatistics,
-    isLoading,
-    isLoadingDecks,
-    isLoadingTasks,
-    isLoadingOverviews,
-    user,
-    isSeeding,
-  ]);
+      flashcards, decks, tasks, overviews,
+      addFlashcard, updateFlashcard, deleteFlashcard, getFlashcardById,
+      addDeck, updateDeck, deleteDeck, getDeckById,
+      addTask, updateTask, deleteTask, getTaskById,
+      getCompletedTasksCountLast30Days, fetchCompletedTasksLast30Days,
+      addOverview, updateOverview, deleteOverview, getOverviewById,
+      getReviewQueue, getStatistics,
+      isLoading, isLoadingDecks, isLoadingTasks, isLoadingOverviews,
+      user, isSeeding
+    ]);
 
   return (
     <FlashcardsContext.Provider value={contextValue}>
@@ -493,3 +586,5 @@ export const useFlashcards = () => {
   }
   return context;
 };
+
+    

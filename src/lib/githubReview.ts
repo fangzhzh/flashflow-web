@@ -1,5 +1,3 @@
-import { auth } from '@/lib/firebase';
-
 /**
  * Client-side GitHub review card fetcher.
  * Round 1: 24h localStorage cache (avoids unnecessary API calls).
@@ -34,19 +32,10 @@ export async function fetchGitHubReviewCards(
     } catch { /* ignore parse errors */ }
   }
 
-  // Get auth token
-  const token = await auth.currentUser?.getIdToken();
-  const headers: HeadersInit = { 'Content-Type': 'application/json' };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
-
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
-
   // Fetch from API (pass variation so Gemini generates different questions)
-  const res = await fetch(`${apiBase}/ai/github-review`, {
+  const res = await fetch('/api/game/github-review', {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ variation }),
   });
   if (!res.ok) {

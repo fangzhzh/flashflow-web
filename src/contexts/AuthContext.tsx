@@ -20,6 +20,8 @@ import { Loader2 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useI18n } from '@/lib/i18n/client';
 import { useRouter, usePathname } from 'next/navigation';
+import type { FieldValue } from 'firebase/firestore'; // Not used here, but good for consistency if other contexts use it
+
 const EMAIL_FOR_SIGN_IN_LINK_KEY = 'emailForSignInLink';
 
 interface AuthContextType {

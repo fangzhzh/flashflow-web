@@ -9,9 +9,12 @@ export default {
   'nav.decks': 'Decks',
   'nav.manage': 'Manage Cards',
   'nav.review': 'Review',
-  'nav.overviews': 'Overviews', // New
+  'nav.leetcode': 'LeetCode',
+  'nav.systemDesign': 'System Design',
+  'nav.overviews': 'Overviews',
   'nav.game': 'Challenge',
   'nav.concurrency': 'Concurrency Arena',
+  'nav.settings.gameEnabled': 'Enable Game Mode',
 
   // Concurrency Arena Page
   'concurrency.title': 'Java Concurrency Arena',
@@ -40,7 +43,6 @@ export default {
   'concurrency.concepts': 'Mastery Concepts',
   'concurrency.requirements': 'Level Goals & Constraints',
   'concurrency.reset.confirm': 'Are you sure you want to reset the code workspace? Your current modifications will be lost.',
-
 
   // Card War Game
   'game.title': 'Card War Challenge',

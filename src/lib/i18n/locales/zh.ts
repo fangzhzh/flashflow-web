@@ -9,9 +9,12 @@ export default {
   'nav.decks': '卡组',
   'nav.manage': '管理卡片',
   'nav.review': '复习',
-  'nav.overviews': '总览', // New
+  'nav.leetcode': 'LeetCode',
+  'nav.systemDesign': '系统设计',
+  'nav.overviews': '总览',
   'nav.game': '挑战',
   'nav.concurrency': '并发竞技场',
+  'nav.settings.gameEnabled': '开启游戏模式',
 
   // Concurrency Arena Page
   'concurrency.title': 'Java 并发对决竞技场',
@@ -40,7 +43,6 @@ export default {
   'concurrency.concepts': '核心概念',
   'concurrency.requirements': '关卡目标与约束',
   'concurrency.reset.confirm': '确定要重置代码吗？当前修改将会丢失。',
-
 
   // Card War Game
   'game.title': '卡牌知识挑战',
