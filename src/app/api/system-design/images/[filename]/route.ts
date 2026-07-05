@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
-
-const GRAPHS_DIR = '/Users/zhangzhenfang/workspace/leetcode/systemDesign/graphs';
+import { db } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 
 export async function GET(
   request: Request,
@@ -14,34 +12,24 @@ export async function GET(
       return new Response('Filename parameter is missing', { status: 400 });
     }
 
-    const safeFilename = path.basename(filename);
-    const fullPath = path.join(GRAPHS_DIR, safeFilename);
+    const docRef = doc(db, 'system_design_images', filename);
+    const docSnap = await getDoc(docRef);
 
-    if (!fs.existsSync(fullPath)) {
+    if (!docSnap.exists()) {
       return new Response('Image not found', { status: 404 });
     }
 
-    const ext = path.extname(safeFilename).toLowerCase();
-    let contentType = 'application/octet-stream';
-    if (ext === '.svg') {
-      contentType = 'image/svg+xml';
-    } else if (ext === '.png') {
-      contentType = 'image/png';
-    } else if (ext === '.jpg' || ext === '.jpeg') {
-      contentType = 'image/jpeg';
-    } else if (ext === '.gif') {
-      contentType = 'image/gif';
-    }
+    const data = docSnap.data();
+    const content = data.content || '';
 
-    const fileBuffer = fs.readFileSync(fullPath);
-    return new Response(fileBuffer, {
+    return new Response(content, {
       headers: {
-        'Content-Type': contentType,
+        'Content-Type': 'image/svg+xml',
         'Cache-Control': 'public, max-age=3600',
       },
     });
   } catch (e: any) {
-    console.error('Error serving system design image:', e);
+    console.error('Error serving system design image from Firestore:', e);
     return new Response(e.message || 'Failed to serve image', { status: 500 });
   }
 }

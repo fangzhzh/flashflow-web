@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
-
-const NOTES_DIR = '/Users/zhangzhenfang/workspace/leetcode/systemDesign';
+import { db } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 
 export async function GET(
   request: Request,
@@ -14,17 +12,17 @@ export async function GET(
       return NextResponse.json({ error: 'Filename parameter is missing' }, { status: 400 });
     }
 
-    const safeFilename = path.basename(filename);
-    const fullPath = path.join(NOTES_DIR, safeFilename);
+    const docRef = doc(db, 'system_design_notes', filename);
+    const docSnap = await getDoc(docRef);
 
-    if (!fs.existsSync(fullPath)) {
+    if (!docSnap.exists()) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
     }
 
-    const content = fs.readFileSync(fullPath, 'utf8');
-    return NextResponse.json({ content });
+    const data = docSnap.data();
+    return NextResponse.json({ content: data.content });
   } catch (e: any) {
-    console.error('Error fetching system design note:', e);
+    console.error('Error fetching system design note from Firestore:', e);
     return NextResponse.json({ error: e.message || 'Failed to fetch note' }, { status: 500 });
   }
 }

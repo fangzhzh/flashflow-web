@@ -1,31 +1,18 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
-
-const NOTES_DIR = '/Users/zhangzhenfang/workspace/leetcode/systemDesign';
+import { db } from '@/lib/firebase';
+import { collection, getDocs } from 'firebase/firestore';
 
 export async function GET() {
   try {
-    if (!fs.existsSync(NOTES_DIR)) {
-      return NextResponse.json({ error: `Directory not found: ${NOTES_DIR}` }, { status: 404 });
-    }
+    const notesRef = collection(db, 'system_design_notes');
+    const snapshot = await getDocs(notesRef);
 
-    const files = fs.readdirSync(NOTES_DIR);
-    const mdFiles = files.filter(f => f.endsWith('.md') && f.toLowerCase() !== 'readme.md');
-
-    const notes = mdFiles.map(filename => {
-      const fullPath = path.join(NOTES_DIR, filename);
-      const stat = fs.statSync(fullPath);
-      const content = fs.readFileSync(fullPath, 'utf8');
-
-      // Try to find the first heading # Title
-      const match = content.match(/^#\s+(.+)$/m);
-      const title = match ? match[1].trim() : filename.replace('.md', '');
-
+    const notes = snapshot.docs.map(doc => {
+      const data = doc.data();
       return {
-        filename,
-        title,
-        sizeBytes: stat.size,
+        filename: data.filename || doc.id,
+        title: data.title || doc.id.replace('.md', ''),
+        sizeBytes: data.sizeBytes || 0,
       };
     });
 
@@ -34,7 +21,7 @@ export async function GET() {
 
     return NextResponse.json(notes);
   } catch (e: any) {
-    console.error('Error listing system design notes:', e);
+    console.error('Error listing system design notes from Firestore:', e);
     return NextResponse.json({ error: e.message || 'Failed to list notes' }, { status: 500 });
   }
 }
